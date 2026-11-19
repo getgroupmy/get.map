@@ -80,6 +80,7 @@ class PostgresStore:
         self.last_error = None
         self.written = 0
         self.spooled = 0
+        self.weeks = set()       # weekly partitions known to exist
 
     async def _conn(self):
         import psycopg
@@ -109,7 +110,30 @@ class PostgresStore:
                 conn = await self._conn()
             async with conn.transaction():
                 async with conn.cursor() as cur:
-                    await write_bundle(cur, bundle)
+                    await write_bundle(cur, bundle, self.weeks)
+        except Exception:
+            if conn is not None and not conn.closed:
+                await conn.close()
+            conn = None
+            raise
+        finally:
+            self._pool.put_nowait(conn)
+
+    async def shape_needs_features(self, shape_hash):
+        """True unless the shape is stored with its lights / cameras checked recently."""
+        from getmap import config
+        await self._ensure_pool()
+        conn = await self._pool.get()
+        try:
+            if conn is None or conn.closed:
+                conn = await self._conn()
+            cur = await conn.execute(
+                """select 1 from map.route_shapes where shape_hash = %s
+                   and features_checked_at > now() - make_interval(days => %s)""",
+                (shape_hash, int(config.SHAPE_FEATURES_REFRESH_DAYS)))
+            row = await cur.fetchone()
+            await conn.commit()
+            return row is None
         except Exception:
             if conn is not None and not conn.closed:
                 await conn.close()
@@ -153,69 +177,120 @@ class PostgresStore:
 
 # ---------------------------------------------------------------------------
 
-async def write_bundle(cur, b):
-    e = b["event"]
+def week_of(ts):
+    from datetime import datetime, timedelta, timezone
+    if isinstance(ts, str):
+        ts = datetime.fromisoformat(ts)
+    d = ts.astimezone(timezone.utc).date()
+    return d - timedelta(days=d.weekday())
+
+
+async def _ensure_week(cur, ts, weeks):
+    wk = week_of(ts)
+    if wk not in weeks:
+        await cur.execute("select map.ensure_week(%s)", (ts,))
+        weeks.add(wk)
+
+
+def _bucket(ts, minutes=15):
+    from datetime import datetime
+    if isinstance(ts, str):
+        ts = datetime.fromisoformat(ts)
+    return ts.replace(minute=ts.minute - ts.minute % minutes, second=0, microsecond=0)
+
+
+def _line_text(line):
+    from getmap import geo
+    return geo.encode_polyline([tuple(p) for p in line]) if line else None
+
+
+async def _place(cur, row, seen_at):
     await cur.execute(
-        """insert into map.search_events (id, source, provider, endpoint, query_text, request, status_code,
-               latency_ms, error, origin_lat, origin_lng, destination_lat, destination_lng, depart_at, arrive_at,
-               client_ref, app_version, response, is_cached, captured_at, processed_at)
-           values (%s,%s,%s,%s,%s,%s::jsonb,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s,now())
-           on conflict (id) do nothing""",
-        (e["id"], e["source"], e["provider"], e["endpoint"], e["query_text"], _j(e["request"]),
-         e["status_code"], e["latency_ms"], e["error"],
-         _pt(e["origin"], 0), _pt(e["origin"], 1), _pt(e["destination"], 0), _pt(e["destination"], 1),
-         e["depart_at"], e["arrive_at"], e["client_ref"], e["app_version"], _j(e["response"]),
-         e["is_cached"], e["captured_at"]))
-    if cur.rowcount == 0:
+        """insert into map.places (place_key, provider, provider_id, kind, name, address, street, city, state,
+               postal_code, country, lat, lng, details, first_seen_at, last_seen_at)
+           values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s)
+           on conflict (place_key) do update set
+               name = coalesce(excluded.name, map.places.name),
+               address = coalesce(excluded.address, map.places.address),
+               street = coalesce(excluded.street, map.places.street),
+               city = coalesce(excluded.city, map.places.city),
+               state = coalesce(excluded.state, map.places.state),
+               postal_code = coalesce(excluded.postal_code, map.places.postal_code),
+               country = coalesce(excluded.country, map.places.country),
+               details = coalesce(excluded.details, map.places.details),
+               last_seen_at = greatest(map.places.last_seen_at, excluded.last_seen_at),
+               seen_count = map.places.seen_count + 1
+           returning id""",
+        (row["place_key"], row["provider"], row["provider_id"], row["kind"], row["name"], row["address"],
+         row["street"], row["city"], row["state"], row["postal_code"], row["country"], row["lat"], row["lng"],
+         _j(row["details"]), seen_at, seen_at))
+    return (await cur.fetchone())[0]
+
+
+async def _weather(cur, w):
+    await cur.execute(
+        """insert into map.weather_observations (cell_y, cell_x, observed_at, is_forecast, provider, lat, lng,
+               temperature_c, apparent_temp_c, humidity_pct, precipitation_mm, rain_mm, weather_code, condition,
+               cloud_cover_pct, visibility_m, wind_speed_kmh, wind_gust_kmh, is_day)
+           values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+           on conflict (cell_y, cell_x, observed_at, is_forecast) do update set captured_at = map.weather_observations.captured_at
+           returning id""",
+        (round(w["lat"] * 20), round(w["lng"] * 20), w["observed_at"], w["is_forecast"], w["provider"],
+         w["lat"], w["lng"], w["temperature_c"], w["apparent_temp_c"], w["humidity_pct"], w["precipitation_mm"],
+         w["rain_mm"], w["weather_code"], w["condition"], w["cloud_cover_pct"], w["visibility_m"],
+         w["wind_speed_kmh"], w["wind_gust_kmh"], w["is_day"]))
+    return (await cur.fetchone())[0]
+
+
+async def _shape(cur, sh, seen_at):
+    feats = sh.get("features")
+    lights = None if feats is None else sum(1 for f in feats if f["feature_type"] == "traffic_light")
+    cams = None if feats is None else sum(1 for f in feats if f["feature_type"] == "speed_camera")
+    packed = None if feats is None else [
+        ["L" if f["feature_type"] == "traffic_light" else "C", f["feature_id"], f["distance_along_m"], f["offset_m"],
+         f["travel_bearing_deg"], f["travel_direction"], f["applies_to_travel"]] for f in feats]
+    await cur.execute(
+        """insert into map.route_shapes (shape_hash, polyline, point_count, length_m, start_lat, start_lng,
+               end_lat, end_lng, bbox, traffic_light_count, speed_camera_count, features, features_checked_at,
+               first_seen_at, last_seen_at)
+           values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,case when %s then now() end,%s,%s)
+           on conflict (shape_hash) do update set
+               last_seen_at = greatest(map.route_shapes.last_seen_at, excluded.last_seen_at),
+               seen_count = map.route_shapes.seen_count + 1,
+               traffic_light_count = coalesce(excluded.traffic_light_count, map.route_shapes.traffic_light_count),
+               speed_camera_count = coalesce(excluded.speed_camera_count, map.route_shapes.speed_camera_count),
+               features = coalesce(excluded.features, map.route_shapes.features),
+               features_checked_at = coalesce(excluded.features_checked_at, map.route_shapes.features_checked_at)
+           returning id""",
+        (sh["hash"], sh["polyline"], sh["point_count"], sh["length_m"], sh["start"][0], sh["start"][1],
+         sh["end"][0], sh["end"][1], sh["bbox"], lights, cams, _j(packed), feats is not None, seen_at, seen_at))
+    return (await cur.fetchone())[0]
+
+
+async def write_bundle(cur, b, weeks=None):
+    weeks = set() if weeks is None else weeks
+    e = b["event"]
+    at = e["captured_at"]
+    await _ensure_week(cur, at, weeks)
+    await cur.execute("select 1 from map.search_events where captured_at = %s and id = %s", (at, e["id"]))
+    if await cur.fetchone():
         return   # already stored (a replay)
 
+    origin_place = dest_place = None
+    results = []
     for row, role, rank in b.get("places", []):
-        await cur.execute(
-            """insert into map.places (place_key, provider, provider_id, kind, name, address, street, city, state,
-                   postal_code, country, lat, lng, details, first_seen_at, last_seen_at)
-               values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s)
-               on conflict (place_key) do update set
-                   name = coalesce(excluded.name, map.places.name),
-                   address = coalesce(excluded.address, map.places.address),
-                   street = coalesce(excluded.street, map.places.street),
-                   city = coalesce(excluded.city, map.places.city),
-                   state = coalesce(excluded.state, map.places.state),
-                   postal_code = coalesce(excluded.postal_code, map.places.postal_code),
-                   country = coalesce(excluded.country, map.places.country),
-                   lat = excluded.lat, lng = excluded.lng,
-                   details = coalesce(excluded.details, map.places.details),
-                   last_seen_at = greatest(map.places.last_seen_at, excluded.last_seen_at),
-                   seen_count = map.places.seen_count + 1
-               returning id""",
-            (row["place_key"], row["provider"], row["provider_id"], row["kind"], row["name"], row["address"],
-             row["street"], row["city"], row["state"], row["postal_code"], row["country"], row["lat"], row["lng"],
-             _j(row["details"]), e["captured_at"], e["captured_at"]))
-        place_id = (await cur.fetchone())[0]
-        await cur.execute(
-            """insert into map.search_event_places (search_event_id, place_id, role, rank)
-               values (%s,%s,%s,%s) on conflict do nothing""", (e["id"], place_id, role, rank))
+        pid = await _place(cur, row, at)
+        if role == "origin":
+            origin_place = pid
+        elif role == "destination":
+            dest_place = pid
+        else:
+            results.append(pid)
 
-    features = b.get("features") or {}
-    for r in b.get("routes", []):
-        poly = r.get("polyline") or []
-        box = None
-        if poly:
-            lats, lngs = [p[0] for p in poly], [p[1] for p in poly]
-            box = [min(lats), min(lngs), max(lats), max(lngs)]
-        feats = features.get(r["id"])
-        await cur.execute(
-            """insert into map.routes (id, search_event_id, provider, rank, name, duration_seconds, distance_meters,
-                   is_fastest, is_toll, toll_price, toll_currency, traffic_status, origin_lat, origin_lng,
-                   destination_lat, destination_lng, depart_at, polyline, bbox, traffic_light_count,
-                   speed_camera_count, captured_at)
-               values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s,%s,%s)""",
-            (r["id"], e["id"], r["provider"], r["rank"], r["name"], r["duration_seconds"], r["distance_meters"],
-             r["is_fastest"], r["is_toll"], r["toll_price"], r["toll_currency"], r["traffic_status"],
-             _pt(r["origin"], 0), _pt(r["origin"], 1), _pt(r["destination"], 0), _pt(r["destination"], 1),
-             r["depart_at"], _j([list(p) for p in poly]) if poly else None, box,
-             None if feats is None else sum(1 for f in feats if f["feature_type"] == "traffic_light"),
-             None if feats is None else sum(1 for f in feats if f["feature_type"] == "speed_camera"),
-             r["captured_at"]))
+    weather_ids = {}
+    for w in b.get("weather", []):
+        wid = await _weather(cur, w)
+        weather_ids.setdefault("place" if w["role"] == "place" else w["role"], wid)
 
     for x in b.get("lights", []):
         await cur.execute(
@@ -233,39 +308,64 @@ async def write_bundle(cur, b):
                    tags = excluded.tags, last_seen_at = now()""",
             (x["id"], x["source"], x["lat"], x["lng"], x.get("max_speed_kmh"), x.get("direction_deg"),
              x.get("direction_text"), x.get("camera_type"), _j(x.get("tags"))))
-    for route_id, rows in features.items():
-        for f in rows:
-            await cur.execute(
-                """insert into map.route_features (route_id, feature_type, feature_id, distance_along_m, offset_m,
-                       travel_bearing_deg, travel_direction, applies_to_travel)
-                   values (%s,%s,%s,%s,%s,%s,%s,%s) on conflict do nothing""",
-                (route_id, f["feature_type"], f["feature_id"], f["distance_along_m"], f["offset_m"],
-                 f["travel_bearing_deg"], f["travel_direction"], f["applies_to_travel"]))
+    shape_ids = {}
+    for h, sh in (b.get("shapes") or {}).items():
+        shape_ids[h] = await _shape(cur, sh, at)
+
+    raw = b.get("raw")
+    await cur.execute(
+        """insert into map.search_events (id, captured_at, source, provider, endpoint, query_text, request,
+               status_code, latency_ms, error, origin_lat, origin_lng, destination_lat, destination_lng,
+               depart_at, arrive_at, client_ref, app_version, is_cached, origin_place_id, destination_place_id,
+               place_ids, origin_weather_id, destination_weather_id, midpoint_weather_id, has_raw)
+           values (%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+        (e["id"], at, e["source"], e["provider"], e["endpoint"], e["query_text"], _j(e["request"]),
+         e["status_code"], e["latency_ms"], e["error"],
+         _pt(e["origin"], 0), _pt(e["origin"], 1), _pt(e["destination"], 0), _pt(e["destination"], 1),
+         e["depart_at"], e["arrive_at"], e["client_ref"], e["app_version"], e["is_cached"],
+         origin_place, dest_place, results or None,
+         weather_ids.get("origin") or weather_ids.get("place"), weather_ids.get("destination"),
+         weather_ids.get("midpoint"), raw is not None))
+    if raw is not None:
+        await cur.execute("insert into map.raw_responses (captured_at, search_event_id, response) values (%s,%s,%s::jsonb)",
+                          (at, e["id"], _j(raw)))
+
+    for r in b.get("routes", []):
+        await cur.execute(
+            """insert into map.routes (id, captured_at, search_event_id, provider, rank, name, duration_seconds,
+                   distance_meters, is_fastest, is_toll, toll_price, toll_currency, traffic_status, depart_at, shape_id)
+               values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+            (r["id"], at, e["id"], r["provider"], r["rank"], r["name"], r["duration_seconds"], r["distance_meters"],
+             r["is_fastest"], r["is_toll"], r["toll_price"], r["toll_currency"], r["traffic_status"], r["depart_at"],
+             shape_ids.get(r.get("shape_hash"))))
 
     for t in b.get("traffic", []):
+        bucket = _bucket(t["observed_at"])
+        await _ensure_week(cur, bucket, weeks)
         await cur.execute(
-            """insert into map.traffic_observations (search_event_id, route_id, provider, kind, external_id, street,
-                   city, level, severity, speed_kmh, length_meters, delay_seconds, status_text, lat, lng, line,
-                   reported_at, observed_at)
-               values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s)""",
-            (e["id"], t["route_id"], t["provider"], t["kind"], t["external_id"], t["street"], t["city"],
-             t["level"], t["severity"], t["speed_kmh"], t["length_meters"], t["delay_seconds"], t["status_text"],
-             t["lat"], t["lng"], _j(t["line"]), t["reported_at"], t["observed_at"]))
+            """insert into map.traffic_observations (observed_at, provider, kind, external_id, street, city, level,
+                   severity, speed_kmh, length_meters, delay_seconds, lat, lng, line, reported_at, last_seen_at)
+               values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+               on conflict (observed_at, provider, external_id) do update set
+                   level = coalesce(excluded.level, map.traffic_observations.level),
+                   severity = coalesce(excluded.severity, map.traffic_observations.severity),
+                   speed_kmh = coalesce(excluded.speed_kmh, map.traffic_observations.speed_kmh),
+                   length_meters = coalesce(excluded.length_meters, map.traffic_observations.length_meters),
+                   street = coalesce(map.traffic_observations.street, excluded.street),
+                   last_seen_at = greatest(map.traffic_observations.last_seen_at, excluded.last_seen_at),
+                   seen_count = map.traffic_observations.seen_count + 1""",
+            (bucket, t["provider"], t["kind"], t["external_id"], t["street"], t["city"], t["level"], t["severity"],
+             t["speed_kmh"], t["length_meters"], t["delay_seconds"], t["lat"], t["lng"], _line_text(t["line"]),
+             t["reported_at"], t["observed_at"]))
     for a in b.get("alerts", []):
-        await cur.execute(
-            """insert into map.road_alerts (search_event_id, route_id, provider, external_id, type, subtype,
-                   description, street, city, lat, lng, thumbs_up, reported_at, observed_at)
-               values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
-            (e["id"], a["route_id"], a["provider"], a["external_id"], a["type"], a["subtype"], a["description"],
-             a["street"], a["city"], a["lat"], a["lng"], a["thumbs_up"], a["reported_at"], a["observed_at"]))
-    for w in b.get("weather", []):
-        await cur.execute(
-            """insert into map.weather_observations (search_event_id, role, provider, lat, lng, observed_at,
-                   is_forecast, temperature_c, apparent_temp_c, humidity_pct, precipitation_mm, rain_mm,
-                   weather_code, condition, cloud_cover_pct, visibility_m, wind_speed_kmh, wind_gust_kmh,
-                   is_day, raw)
-               values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb)""",
-            (e["id"], w["role"], w["provider"], w["lat"], w["lng"], w["observed_at"], w["is_forecast"],
-             w["temperature_c"], w["apparent_temp_c"], w["humidity_pct"], w["precipitation_mm"], w["rain_mm"],
-             w["weather_code"], w["condition"], w["cloud_cover_pct"], w["visibility_m"], w["wind_speed_kmh"],
-             w["wind_gust_kmh"], w["is_day"], _j(w["raw"])))
+        sql = """insert into map.road_alerts (provider, external_id, type, subtype, description, street, city, lat, lng,
+                     thumbs_up, reported_at, first_seen_at, last_seen_at)
+                 values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)"""
+        if a["external_id"]:
+            sql += """ on conflict (provider, external_id) do update set
+                     last_seen_at = greatest(map.road_alerts.last_seen_at, excluded.last_seen_at),
+                     thumbs_up = coalesce(excluded.thumbs_up, map.road_alerts.thumbs_up),
+                     seen_count = map.road_alerts.seen_count + 1"""
+        await cur.execute(sql, (a["provider"], a["external_id"], a["type"], a["subtype"], a["description"], a["street"],
+                                a["city"], a["lat"], a["lng"], a["thumbs_up"], a["reported_at"], a["observed_at"],
+                                a["observed_at"]))

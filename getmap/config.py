@@ -68,3 +68,32 @@ UPSTREAMS = {
     "get_route_backup": os.environ.get("UPSTREAM_GET_ROUTE_BACKUP", ""),  # e.g. http://traffic-scraper:8000
     "get_route_apple": os.environ.get("UPSTREAM_GET_ROUTE_APPLE", ""),    # e.g. http://get-route-apple:8000
 }
+
+# ---- storage on one machine (see docs/STORAGE.md) --------------------------------------
+# Raw answers: "all", "errors" (failed requests only), "sample" (errors + RAW_SAMPLE_RATE
+# of the rest) or "none". They are the biggest thing stored, so keep them briefly.
+STORE_RAW = os.environ.get("STORE_RAW", "sample")
+RAW_SAMPLE_RATE = _float("RAW_SAMPLE_RATE", 0.01)
+# Road shapes are thinned to this many metres before they are stored (the lights
+# and cameras are matched on the full shape first).
+SHAPE_TOLERANCE_M = _float("SHAPE_TOLERANCE_M", 10.0)
+# A shape's lights and cameras are looked up again after this many days.
+SHAPE_FEATURES_REFRESH_DAYS = _float("SHAPE_FEATURES_REFRESH_DAYS", 30)
+
+# How long to keep each kind of data (days; 0 = forever).
+RETAIN_RAW_DAYS = _int("RETAIN_RAW_DAYS", 7)
+RETAIN_EVENTS_DAYS = _int("RETAIN_EVENTS_DAYS", 400)      # search_events + routes
+RETAIN_TRAFFIC_DAYS = _int("RETAIN_TRAFFIC_DAYS", 800)
+RETAIN_SHAPES_DAYS = _int("RETAIN_SHAPES_DAYS", 180)      # by last time quoted
+RETAIN_ALERTS_DAYS = _int("RETAIN_ALERTS_DAYS", 800)
+RETAIN_WEATHER_DAYS = _int("RETAIN_WEATHER_DAYS", 800)
+# Places, traffic lights and speed cameras are kept forever (they are small).
+
+# The disk guard: when the database is bigger than MAX_DB_GB, or the disk has
+# less than MIN_FREE_DISK_GB free, the oldest weeks are dropped (raw answers
+# first, then traffic, then searches) until both are fine again. Raw answers
+# stop being stored while the disk is short.
+MAX_DB_GB = _float("MAX_DB_GB", 300)
+MIN_FREE_DISK_GB = _float("MIN_FREE_DISK_GB", 80)
+DISK_PATH = os.environ.get("DISK_PATH", "/")          # the disk Postgres keeps its data on
+RETENTION_EVERY_MINUTES = _int("RETENTION_EVERY_MINUTES", 60)

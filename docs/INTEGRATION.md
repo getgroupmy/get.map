@@ -48,12 +48,12 @@ getmap_capture.install_fastapi(app, source="get_route_apple")
 Then in each `deploy/nas/.env`:
 
 ```
-GETMAP_URL=http://get-map:8090
-GETMAP_KEY=<CAPTURE_API_KEY>
+GETMAP_URL=http://<mac-mini-ip>:8090
+GETMAP_KEY=<CAPTURE_API_KEY from the Mac mini's ~/getmap/getmap.env>
 ```
 
 **No code change at all:** you can instead point the route server cards in GET.ride (Admin › Fare AI provider)
-at get.map's tap, e.g. `https://map.getride.my/tap/get_route`. get.map forwards each call with its
+at get.map's tap, e.g. `http://<mac-mini-ip>:8090/tap/get_route` (set `UPSTREAM_*` in `getmap.env`). get.map forwards each call with its
 `X-Route-Key`, returns the answer unchanged and records it. This adds one hop (a few ms on the NAS network)
 to a 2 s budget, so the drop-in above is preferred.
 
@@ -63,6 +63,7 @@ Copy `integrations/supabase/mapCapture.ts` to `supabase/functions/_shared/map_ca
 secrets:
 
 ```bash
+# map.getride.my -> the Mac mini, through GET.ride's existing tunnel (deploy/macmini/README.md, step 4)
 supabase secrets set GETMAP_URL=https://map.getride.my GETMAP_KEY=... GETMAP_CLIENT_SALT=$(openssl rand -hex 32)
 ```
 
@@ -117,7 +118,9 @@ if (endpoint) {
 `fare_ai_responses` holds every route-server answer since the fare chain started:
 
 ```bash
-DATABASE_URL=... python -m getmap.backfill --source-db "$GETRIDE_DB_URL" --since 2026-10-01
+# on the Mac mini
+cd ~/getmap/app && set -a && . ~/getmap/getmap.env && set +a
+~/getmap/venv/bin/python -m getmap.backfill --source-db "$GETRIDE_DB_URL" --since 2026-10-01
 ```
 
 It cuts `raw_response` at 4,000 characters, so most old route shapes are lost. The backfill falls back to the

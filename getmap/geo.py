@@ -115,3 +115,73 @@ def midpoint(line):
             return (a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1]))
         run += seg
     return line[-1]
+
+
+def simplify(line, tolerance_m):
+    """Douglas-Peucker: drop points that sit within tolerance_m of the line
+    through their neighbours. Keeps the first and last point."""
+    if len(line) < 3 or tolerance_m <= 0:
+        return list(line)
+    keep = [False] * len(line)
+    keep[0] = keep[-1] = True
+    stack = [(0, len(line) - 1)]
+    while stack:
+        a, b = stack.pop()
+        if b - a < 2:
+            continue
+        origin = line[a]
+        bx, by = _xy(origin, line[b])
+        seg2 = bx * bx + by * by
+        best, idx = -1.0, None
+        for i in range(a + 1, b):
+            px, py = _xy(origin, line[i])
+            t = 0.0 if seg2 == 0 else max(0.0, min(1.0, (px * bx + py * by) / seg2))
+            d = math.hypot(px - t * bx, py - t * by)
+            if d > best:
+                best, idx = d, i
+        if best > tolerance_m:
+            keep[idx] = True
+            stack.append((a, idx))
+            stack.append((idx, b))
+    return [p for p, k in zip(line, keep) if k]
+
+
+def length_m(line):
+    return sum(haversine_m(a, b) for a, b in zip(line, line[1:]))
+
+
+def encode_polyline(line, precision=5):
+    """Google's encoded polyline format: ~5-6 bytes a point instead of ~40 as JSON."""
+    factor = 10 ** precision
+    out, prev_lat, prev_lng = [], 0, 0
+    for lat, lng in line:
+        ilat, ilng = int(round(lat * factor)), int(round(lng * factor))
+        for v in (ilat - prev_lat, ilng - prev_lng):
+            v = ~(v << 1) if v < 0 else v << 1
+            while v >= 0x20:
+                out.append(chr((0x20 | (v & 0x1F)) + 63))
+                v >>= 5
+            out.append(chr(v + 63))
+        prev_lat, prev_lng = ilat, ilng
+    return "".join(out)
+
+
+def decode_polyline(text, precision=5):
+    factor = 10 ** precision
+    coords, i, lat, lng = [], 0, 0, 0
+    while i < len(text):
+        vals = []
+        for _ in range(2):
+            shift = result = 0
+            while True:
+                b = ord(text[i]) - 63
+                i += 1
+                result |= (b & 0x1F) << shift
+                shift += 5
+                if b < 0x20:
+                    break
+            vals.append(~(result >> 1) if result & 1 else result >> 1)
+        lat += vals[0]
+        lng += vals[1]
+        coords.append((lat / factor, lng / factor))
+    return coords

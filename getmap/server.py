@@ -31,7 +31,7 @@ import httpx
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
 
-from getmap import config
+from getmap import config, retention
 from getmap.normalize import ENDPOINTS, SOURCES
 from getmap.pipeline import Pipeline
 from getmap.store import PostgresStore, SpoolStore
@@ -72,6 +72,7 @@ def create_app(store=None, client=None, pipeline=None):
         tasks = []
         if isinstance(state["store"], PostgresStore):
             tasks.append(asyncio.create_task(_replay_loop(state["store"])))
+            tasks.append(asyncio.create_task(retention.loop(state["store"].dsn, state["pipeline"])))
         yield
         await state["pipeline"].stop()
         for t in tasks:
@@ -155,6 +156,7 @@ def create_app(store=None, client=None, pipeline=None):
             p, s = state["pipeline"], state["store"]
             out.update({
                 "queue": p.queue.qsize(), **p.stats, "last_enrich_error": p.last_enrich_error,
+                "raw_paused_for_disk": p.raw_paused,
                 "store": "postgres" if isinstance(s, PostgresStore) else "spool",
                 "store_written": getattr(s, "written", None), "store_spooled": getattr(s, "spooled", None),
                 "store_last_error": getattr(s, "last_error", None),

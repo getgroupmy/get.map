@@ -309,14 +309,7 @@ def _routes(out, resp, provider, observed, req):
             "polyline": poly,
             "captured_at": observed,
         })
-        if _text(r.get("traffic_status")):
-            out["traffic"].append({
-                "route_id": route_id, "provider": provider, "kind": "route_status",
-                "external_id": None, "street": _text(r.get("name")), "city": None,
-                "level": None, "severity": None, "speed_kmh": None, "length_meters": None,
-                "delay_seconds": None, "status_text": _text(r.get("traffic_status")),
-                "lat": None, "lng": None, "line": None, "reported_at": None, "observed_at": observed,
-            })
+        # the route's own traffic text stays on the route row (routes.traffic_status)
         for jam in r.get("jams") or []:
             t = traffic_from_jam(jam, provider, observed, kind="route_jam", route_id=route_id)
             if t:

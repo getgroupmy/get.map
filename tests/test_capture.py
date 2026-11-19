@@ -5,7 +5,7 @@ import httpx
 import pytest
 
 from conftest import load
-from getmap import geo
+from getmap import config, geo
 from getmap.enrich import osm, weather
 from getmap.normalize import normalize
 from getmap.pipeline import Pipeline
@@ -107,8 +107,7 @@ def test_google_and_apple_shapes():
               "source": "google_maps"}
     out = normalize({"source": "get_route_backup", "endpoint": "routes_search", "request": {}, "response": google})
     assert out["event"]["provider"] == "google_maps"
-    status = [t for t in out["traffic"] if t["kind"] == "route_status"]
-    assert status[0]["status_text"] == "Fastest route, the usual traffic"
+    assert out["routes"][0]["traffic_status"] == "Fastest route, the usual traffic"
 
     apple = {**google, "source": "apple_maps", "stale": True}
     out = normalize({"source": "get_route_apple", "endpoint": "routes_search", "request": {}, "response": apple})
@@ -201,9 +200,10 @@ def test_pipeline_to_spool(tmp_path, waze_routes):
         b2 = await Pipeline(store, client).process(route_event(waze_routes))
         return b, b2, calls, store
     b, _, calls, store = asyncio.run(run())
-    r0 = b["routes"][0]["id"]
-    kinds = {f["feature_type"] for f in b["features"][r0]}
+    shape = b["shapes"][b["routes"][0]["shape_hash"]]
+    kinds = {f["feature_type"] for f in shape["features"]}
     assert kinds == {"traffic_light", "speed_camera"}
+    assert shape["point_count"] < 378 and shape["length_m"] > 25000          # thinned, full length kept
     assert {w["role"] for w in b["weather"]} == {"origin", "destination", "midpoint"}
     assert len(store.files()) == 1 and len(store.files()[0].read_text().splitlines()) == 2
 
@@ -236,38 +236,53 @@ def test_enrichment_failure_still_stores(tmp_path, waze_routes):
     assert p.stats["enrich_errors"] > 0 and len(b["routes"]) == 3 and b["weather"] == []
 
 
-def test_postgres_end_to_end(db_url, tmp_path, waze_routes):
+def test_postgres_end_to_end(db_url, tmp_path, waze_routes, monkeypatch):
     import psycopg
+    monkeypatch.setattr(config, "STORE_RAW", "errors")
 
     async def run():
         line = [(p["lat"], p["lng"]) for p in waze_routes["routes"][0]["polyline"]]
-        client, _ = fake_client(line)
+        client, calls = fake_client(line)
         store = PostgresStore(db_url, SpoolStore(tmp_path))
         pipe = Pipeline(store, client)
-        ev = route_event(waze_routes, id="11111111-1111-1111-1111-111111111111")
-        await pipe.process(ev)
-        await pipe.process(ev)                       # the same event again: stored once
-        await pipe.process(route_event(waze_routes))  # a second search, same places
+        ev = route_event(waze_routes, id="11111111-1111-1111-1111-111111111111",
+                         captured_at="2026-11-18T08:05:00Z")
+        await pipe.process(dict(ev))
+        first = calls["overpass"]
+        await pipe.process(dict(ev))                       # the same event again: stored once
+        await pipe.process(route_event(waze_routes))       # the same trip quoted again
+        await Pipeline(store, client).process(route_event(waze_routes))   # ... by a fresh worker (asks the DB)
         await pipe.process({"source": "get_route", "endpoint": "jams_search", "request": {},
                             "response": load("get_route_jams_alerts_london.json")})
+        await pipe.process({"source": "get_route", "endpoint": "jams_search", "request": {},
+                            "response": load("get_route_jams_alerts_london.json")})   # same jams, same 15 min
+        await pipe.process({"source": "get_route", "endpoint": "routes_search", "request": {},
+                            "status_code": 500, "response": {"error": "waze failed"}})
         await store.close()
-        return store
-    store = asyncio.run(run())
+        return store, first, calls["overpass"]
+    store, first, total = asyncio.run(run())
     assert store.spooled == 0, store.last_error
+    assert first > 0 and total == first      # lights / cameras looked up once per shape, never again
     with psycopg.connect(db_url) as c:
         q = lambda sql: c.execute(sql).fetchone()[0]
-        assert q("select count(*) from map.search_events") == 3
-        assert q("select count(*) from map.routes") == 6
+        assert q("select count(*) from map.search_events") == 6
+        assert q("select count(*) from map.routes") == 9
+        assert q("select count(*) from map.route_shapes") == 3                # stored once each
+        assert q("select seen_count from map.route_shapes order by id limit 1") == 3
         assert q("select count(*) from map.places") == 2
-        assert q("select seen_count from map.places where name = 'Westminster Abbey'") == 2
+        assert q("select seen_count from map.places where name = 'Westminster Abbey'") == 3
         assert q("select count(*) from map.traffic_lights") == 1
         assert q("select count(*) from map.speed_cameras") == 3
-        assert q("select count(*) from map.route_features where feature_type = 'speed_camera' and applies_to_travel") >= 2
-        assert q("select traffic_light_count from map.routes where rank = 0 limit 1") == 1
+        assert q("select count(*) from map.speed_cameras_on_routes where applies_to_travel") >= 2
+        assert q("select traffic_light_count from map.route_shapes order by id limit 1") == 1
         assert q("select count(*) from map.road_alerts") == 15
+        assert q("select max(seen_count) from map.road_alerts") == 2
         assert q("select count(*) from map.traffic_observations where kind = 'area_jam'") == 10
-        assert q("select count(*) from map.weather_observations where condition = 'rain'") == 6
-        assert q("select count(*) from map.route_conditions where weather = 'rain'") == 6
+        assert q("select count(*) from map.weather_observations") == 3   # start, end, middle: 3 cells, stored once for 4 quotes
+        assert q("select count(*) from map.route_conditions where weather = 'rain'") == 9
+        assert q("select count(*) from map.raw_responses") == 1               # only the failed request
+        enc = q("select polyline from map.route_shapes order by id limit 1")
+        assert geo.decode_polyline(enc)[0] == (51.50732, -0.12803)
 
 
 def test_database_down_goes_to_spool_and_replays(db_url, tmp_path, waze_routes):
@@ -286,3 +301,29 @@ def test_database_down_goes_to_spool_and_replays(db_url, tmp_path, waze_routes):
     assert asyncio.run(run()) == 1
     with psycopg.connect(db_url) as c:
         assert c.execute("select count(*) from map.routes").fetchone()[0] == 3
+        assert c.execute("select count(*) from map.route_shapes").fetchone()[0] == 3
+
+
+def test_raw_policy(tmp_path, waze_routes, monkeypatch):
+    async def run(policy, paused=False, status=200):
+        monkeypatch.setattr(config, "STORE_RAW", policy)
+        p = Pipeline(SpoolStore(tmp_path), None)
+        p.raw_paused = paused
+        return (await p.process(route_event(waze_routes, status_code=status)))["raw"]
+    assert asyncio.run(run("all")) is not None
+    assert asyncio.run(run("none", status=500)) is None
+    assert asyncio.run(run("errors")) is None
+    assert asyncio.run(run("errors", status=500)) is not None
+    assert asyncio.run(run("all", paused=True)) is None                  # disk short: errors only
+    monkeypatch.setattr(config, "RAW_SAMPLE_RATE", 1.0)
+    assert asyncio.run(run("sample")) is not None
+
+
+def test_polyline_encoding_and_simplify(waze_routes):
+    line = [(p["lat"], p["lng"]) for p in waze_routes["routes"][0]["polyline"]]
+    thin = geo.simplify(line, 10)
+    assert thin[0] == line[0] and thin[-1] == line[-1] and len(thin) < len(line)
+    # every dropped point is within ~10 m of the thinned line
+    assert max(geo.nearest_on_line(p, thin)[0] for p in line) <= 10.5
+    back = geo.decode_polyline(geo.encode_polyline(thin))
+    assert all(abs(a[0] - b[0]) < 1e-5 and abs(a[1] - b[1]) < 1e-5 for a, b in zip(thin, back))
