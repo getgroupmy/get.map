@@ -5,6 +5,7 @@
                                   reply unchanged, and records it  (X-Capture-Key
                                   or the route server's own X-Route-Key)
     GET  /health                  always open; queue and store counters with the key
+    GET  /ui                      the data viewer (UI_USER / UI_PASSWORD; see getmap/ui)
 
 An event:
     {
@@ -83,6 +84,13 @@ def create_app(store=None, client=None, pipeline=None):
 
     app = FastAPI(title="get.map capture", lifespan=lifespan)
     app.state.ctx = state
+    from getmap import ui
+    ui.mount(app, state)
+
+    @app.get("/", include_in_schema=False)
+    async def root():
+        from fastapi.responses import RedirectResponse
+        return RedirectResponse("/ui")
 
     def key_ok(request):
         expected = config.CAPTURE_API_KEY

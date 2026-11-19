@@ -47,6 +47,31 @@ curl -s -H "X-Capture-Key: $(grep ^CAPTURE_API_KEY ~/getmap/getmap.env | cut -d=
 
 macOS asks once whether Python may accept incoming connections: allow it.
 
+## View the data
+
+Open **http://192.168.1.50:8090/ui** (the Mac mini's address) from any computer or phone on the office
+network. Sign in as `admin` with the `UI_PASSWORD` from `~/getmap/getmap.env`. `setup.sh` makes one and
+prints it. On the Mac mini itself, http://localhost:8090/ui works too.
+
+| Tab | Shows |
+|---|---|
+| Overview | Searches, routes and failures over time, by app; totals; database and disk; the capture service's state |
+| Map | Speed cameras (arrow = direction checked), traffic lights, jams (coloured by level), incidents and places, for the area on screen |
+| Searches | Every search with filters (app, request, text, failed only). Click one for its places, routes, weather and the raw answer if one was kept. |
+| Routes | Every route: time, distance, traffic, lights, cameras, weather. Click one for its map, every camera on the way (and whether it applies to that direction) and every traffic light. |
+| Places | Every place with latitude and longitude, most searched first |
+| Cameras & lights | All speed cameras (limit, direction, how often they're on quoted routes) and traffic lights |
+| Traffic | When it jams (day × hour), the worst streets, every jam reading, Waze incidents |
+| Weather | Readings with time and a summary by condition |
+| Storage | Database size against the limits, size per week, retention |
+
+Every table has **Download CSV** (up to 50,000 rows) to open in Excel or Google Sheets. The viewer only
+reads: it opens the database read-only, so it can't change or delete anything.
+
+To open it from outside the office, don't publish it on the open internet. Put it behind Cloudflare Access
+(Zero Trust › Access › Applications) on a hostname such as `mapdata.getride.my`, pointing at
+`http://192.168.1.50:8090`. Then only people you allow can sign in, and the password above still applies.
+
 ## 3. Connect the route servers (NAS)
 
 In each route server's `deploy/nas/.env` on the NAS:

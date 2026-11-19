@@ -27,6 +27,14 @@ It runs on **one Mac mini (512 GB)**: the database is compact (~2.5 KB per fare 
                                                                      on the Mac mini (or a local spool while the DB is down)
 ```
 
+## The data viewer
+
+Open `http://<mac-mini-ip>:8090/ui` to browse it all: an overview, a map (cameras with their direction,
+lights, jams, incidents), searches, routes (each on its own map with every camera and light on the way),
+places with latitude and longitude, traffic by hour, weather and storage. Every table downloads as CSV.
+It is read-only and needs a password (`UI_PASSWORD`); see
+[deploy/macmini/README.md](deploy/macmini/README.md#view-the-data).
+
 ## Data only, in a local database
 
 Everything is stored as **data** (text, numbers, coordinates and times) in **one Postgres database on the Mac
@@ -60,6 +68,7 @@ you put the `map` schema in Supabase.)
 |---|---|
 | `POST /capture` | One event, or `{"events": [...]}` (up to 500). `X-Capture-Key`. Returns `202` at once. |
 | `GET /tap/<source>/<path>` | Transparent proxy to a route server that records the answer (no code change needed in that server). |
+| `GET /ui` | The data viewer (sign in with `UI_USER` / `UI_PASSWORD`). Its read-only JSON is under `/api/ui/...`. |
 | `GET /health` | Always open. With the key it also shows queue, processed, dropped, enrichment errors and store state. |
 
 Event fields: `source` (`get_ride`, `get_route`, `get_route_backup` or `get_route_apple`), `endpoint`

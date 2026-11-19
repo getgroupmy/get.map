@@ -50,9 +50,12 @@ fi
 
 # 5. Settings
 if [ ! -f "$HOME_DIR/getmap.env" ]; then
-  sed "s|^CAPTURE_API_KEY=.*|CAPTURE_API_KEY=$(openssl rand -hex 32)|" "$HERE/getmap.env.example" > "$HOME_DIR/getmap.env"
+  ui_password="$(openssl rand -base64 18 | tr -d '/+=' | cut -c1-16)"
+  sed -e "s|^CAPTURE_API_KEY=.*|CAPTURE_API_KEY=$(openssl rand -hex 32)|" \
+      -e "s|^UI_PASSWORD=.*|UI_PASSWORD=$ui_password|" "$HERE/getmap.env.example" > "$HOME_DIR/getmap.env"
   chmod 600 "$HOME_DIR/getmap.env"
-  echo "Wrote $HOME_DIR/getmap.env (a new CAPTURE_API_KEY is in it)."
+  echo "Wrote $HOME_DIR/getmap.env (a new CAPTURE_API_KEY and viewer password are in it)."
+  echo "Data viewer: http://$(ipconfig getifaddr en0 2>/dev/null || echo localhost):8090/ui  user: admin  password: $ui_password"
 fi
 
 # 6. launchd: get.map (always on) and the nightly backup

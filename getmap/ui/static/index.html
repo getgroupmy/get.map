@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>get.map data</title>
+<link rel="stylesheet" href="/ui/static/vendor/leaflet/leaflet.css">
+<link rel="stylesheet" href="/ui/static/style.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand">get.map <span>data viewer</span></div>
+  <nav class="tabs" id="tabs">
+    <button data-tab="overview" class="on">Overview</button>
+    <button data-tab="map">Map</button>
+    <button data-tab="searches">Searches</button>
+    <button data-tab="routes">Routes</button>
+    <button data-tab="places">Places</button>
+    <button data-tab="cameras">Cameras &amp; lights</button>
+    <button data-tab="traffic">Traffic</button>
+    <button data-tab="weather">Weather</button>
+    <button data-tab="storage">Storage</button>
+  </nav>
+  <div class="range" id="range">
+    <label>Period
+      <select id="period">
+        <option value="1">Last hour</option>
+        <option value="24" selected>Last 24 hours</option>
+        <option value="168">Last 7 days</option>
+        <option value="720">Last 30 days</option>
+        <option value="8760">Last 12 months</option>
+        <option value="custom">Custom…</option>
+      </select>
+    </label>
+    <span id="custom" hidden>
+      <input type="datetime-local" id="since" aria-label="From">
+      <input type="datetime-local" id="until" aria-label="To">
+    </span>
+    <button id="refresh" class="ghost" title="Reload">↻</button>
+  </div>
+</header>
+
+<main>
+  <section id="tab-overview" class="tab on"></section>
+  <section id="tab-map" class="tab">
+    <div class="toolbar">
+      <label><input type="checkbox" data-layer="cameras" checked> Speed cameras</label>
+      <label><input type="checkbox" data-layer="lights" checked> Traffic lights</label>
+      <label><input type="checkbox" data-layer="jams" checked> Jams</label>
+      <label><input type="checkbox" data-layer="alerts" checked> Incidents</label>
+      <label><input type="checkbox" data-layer="places"> Places</label>
+      <span class="hint" id="map-hint"></span>
+    </div>
+    <div id="bigmap" class="map big"></div>
+    <div class="legend">
+      <span><i class="dot cam-yes"></i> camera</span>
+      <span><i class="dot light"></i> traffic light</span>
+      <span><i class="bar l1"></i><i class="bar l3"></i><i class="bar l5"></i> jam, light → standstill</span>
+      <span><i class="dot alert"></i> incident</span>
+      <span><i class="dot place"></i> place</span>
+    </div>
+  </section>
+  <section id="tab-searches" class="tab"></section>
+  <section id="tab-routes" class="tab"></section>
+  <section id="tab-places" class="tab"></section>
+  <section id="tab-cameras" class="tab"></section>
+  <section id="tab-traffic" class="tab"></section>
+  <section id="tab-weather" class="tab"></section>
+  <section id="tab-storage" class="tab"></section>
+</main>
+
+<aside id="drawer" class="drawer" hidden>
+  <div class="drawer-head">
+    <h2 id="drawer-title"></h2>
+    <button class="ghost" id="drawer-close" aria-label="Close">✕</button>
+  </div>
+  <div id="drawer-body" class="drawer-body"></div>
+</aside>
+
+<script src="/ui/static/vendor/leaflet/leaflet.js"></script>
+<script src="/ui/static/app.js"></script>
+</body>
+</html>

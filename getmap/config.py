@@ -97,3 +97,14 @@ MAX_DB_GB = _float("MAX_DB_GB", 300)
 MIN_FREE_DISK_GB = _float("MIN_FREE_DISK_GB", 80)
 DISK_PATH = os.environ.get("DISK_PATH", "/")          # the disk Postgres keeps its data on
 RETENTION_EVERY_MINUTES = _int("RETENTION_EVERY_MINUTES", 60)
+
+# ---- web UI (/ui) ----------------------------------------------------------------------
+# Sign-in for the data viewer. Without UI_PASSWORD the viewer only opens on the
+# Mac mini itself (http://localhost:8090/ui).
+UI_USER = os.environ.get("UI_USER", "admin")
+UI_PASSWORD = os.environ.get("UI_PASSWORD", "")
+UI_TIMEZONE = os.environ.get("UI_TIMEZONE", "Asia/Kuala_Lumpur")
+# Background map in the viewer: shown in the browser only, never stored. Empty = no
+# background (lines and points on a plain grid). get-ride's own tiles work too.
+UI_TILE_URL = os.environ.get("UI_TILE_URL", "https://tile.openstreetmap.org/{z}/{x}/{y}.png")
+UI_TILE_ATTRIBUTION = os.environ.get("UI_TILE_ATTRIBUTION", "© OpenStreetMap contributors")
