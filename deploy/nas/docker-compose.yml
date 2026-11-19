@@ -1,0 +1,19 @@
+# get.map next to GET.route on the office NAS. It joins GET.route's Docker
+# network, so the route servers reach it by name (http://get-map:8090) and
+# GET.route's cloudflared can publish it (e.g. map.getride.my) for GET.ride's
+# Supabase functions.
+services:
+  get-map:
+    build: ../..
+    container_name: get-map
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./data:/data          # the spool: captures waiting for the database
+    mem_limit: 512m
+    networks: [route]
+
+networks:
+  route:
+    external: true
+    name: ${GET_ROUTE_NETWORK:-nas_default}

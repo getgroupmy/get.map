@@ -1,0 +1,6 @@
+spool/
+deploy/nas/.env
+deploy/nas/data/
+__pycache__/
+*.pyc
+.pytest_cache/
