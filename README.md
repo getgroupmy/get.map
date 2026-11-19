@@ -27,6 +27,21 @@ It runs on **one Mac mini (512 GB)**: the database is compact (~2.5 KB per fare 
                                                                      on the Mac mini (or a local spool while the DB is down)
 ```
 
+## Data only, in a local database
+
+Everything is stored as **data** (text, numbers, coordinates and times) in **one Postgres database on the Mac
+mini**. There's no cloud database, and get.map saves no files except while the database is down.
+
+- **No map images.** get.map never downloads or saves map tiles, screenshots, static maps, Street View or
+  photos. A road shape is a list of coordinates (an encoded polyline), not a picture.
+- **Photos and icons are removed.** Some answers carry photo links and references, venue images and icons.
+  `normalize.strip_images` removes those fields before anything is stored, including from the sampled raw
+  answers.
+- **What gets drawn on a map** (routes, lights, cameras, jams) is rebuilt from the coordinates when you need
+  it, for example in QGIS, or on the admin map from `map.route_shapes.polyline`.
+- **The only files** are `SPOOL_DIR` (JSON text, held while the database is unreachable and then moved into
+  it) and the nightly backup dump on the NAS.
+
 ## Set up (Mac mini)
 
 1. **Mac mini:** follow [deploy/macmini/README.md](deploy/macmini/README.md). `setup.sh` installs Postgres

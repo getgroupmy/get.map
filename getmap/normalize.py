@@ -105,6 +105,24 @@ def line(raw):
     return [p for p in (point(x) for x in raw) if p]
 
 
+# ---- no images -------------------------------------------------------------------------
+# get.map stores data only (names, coordinates, times, numbers). Photo / image /
+# icon / tile fields that some answers carry (Waze venue `images`, Google
+# `photos`, map tile links) are removed before anything is stored.
+IMAGE_KEYS = {"images", "image", "photos", "photo", "photo_reference", "icon", "icon_url", "icon_mask_base_uri",
+              "iconbackgroundcolor", "thumbnail", "thumbnails", "tiles", "tile", "tile_url", "screenshot",
+              "static_map", "staticmap", "street_view", "streetview"}
+
+
+def strip_images(value):
+    """A copy of value with every image-like field removed, at any depth."""
+    if isinstance(value, dict):
+        return {k: strip_images(v) for k, v in value.items() if str(k).lower() not in IMAGE_KEYS}
+    if isinstance(value, list):
+        return [strip_images(v) for v in value]
+    return value
+
+
 # ---- places ----------------------------------------------------------------------------
 
 def place_key(provider, provider_id, name, lat, lng):
@@ -156,8 +174,9 @@ def place_row(raw, default_provider, kind=None, details=False):
     for k in ("street", "city", "state", "country"):
         row[k] = row[k] or _text(raw.get(k))
     if details:
-        row["details"] = {k: v for k, v in raw.items()
-                          if k not in ("id", "kind", "name", "location", "address") and v not in (None, [], {})}
+        row["details"] = strip_images({k: v for k, v in raw.items()
+                                       if k not in ("id", "kind", "name", "location", "address")
+                                       and v not in (None, [], {})}) or None
     row["place_key"] = place_key(provider, provider_id, name, loc[0], loc[1])
     return row
 

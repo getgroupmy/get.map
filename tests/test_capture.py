@@ -327,3 +327,27 @@ def test_polyline_encoding_and_simplify(waze_routes):
     assert max(geo.nearest_on_line(p, thin)[0] for p in line) <= 10.5
     back = geo.decode_polyline(geo.encode_polyline(thin))
     assert all(abs(a[0] - b[0]) < 1e-5 and abs(a[1] - b[1]) < 1e-5 for a, b in zip(thin, back))
+
+
+def test_no_images_are_stored(tmp_path, monkeypatch):
+    venue = {"id": "187433368.1874464748.1166515", "kind": "waze_venue", "name": "Pavilion KL",
+             "location": {"lat": 3.149, "lng": 101.713}, "address": {"formatted": "Jalan Bukit Bintang"},
+             "phone": "+60 3-2118 8833", "opening_hours": [{"day": "monday", "opens": "10:00", "closes": "22:00"}],
+             "images": [{"id": "a", "small": "https://img/1s.jpg", "large": "https://img/1l.jpg"}],
+             "photos": [{"reference": "AWU5eFh", "width": 4032}], "icon": "https://maps/icon.png"}
+    out = normalize({"source": "get_route", "endpoint": "places_details", "request": {}, "response": venue})
+    details = out["places"][0][0]["details"]
+    assert details["phone"] == "+60 3-2118 8833" and details["opening_hours"]
+    assert not {"images", "photos", "icon"} & set(details)
+
+    monkeypatch.setattr(config, "STORE_RAW", "all")
+    b = asyncio.run(Pipeline(SpoolStore(tmp_path), None).process(
+        {"source": "get_ride", "endpoint": "places_search", "request": {"q": "pavilion"},
+         "response": {"places": [venue]}}))
+    raw = b["raw"]["places"][0]
+    assert raw["name"] == "Pavilion KL" and not {"images", "photos", "icon"} & set(raw)
+    assert "jpg" not in (tmp_path / store_file(tmp_path)).read_text()
+
+
+def store_file(tmp_path):
+    return next(tmp_path.glob("capture-*.jsonl")).name

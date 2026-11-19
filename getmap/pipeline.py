@@ -18,7 +18,7 @@ from datetime import timedelta
 
 from getmap import config, geo
 from getmap.enrich import osm, weather
-from getmap.normalize import normalize, now_utc
+from getmap.normalize import normalize, now_utc, strip_images
 
 log = logging.getLogger("getmap.pipeline")
 
@@ -126,7 +126,7 @@ class Pipeline:
         keep = (policy == "all"
                 or (policy in ("errors", "sample") and failed)
                 or (policy == "sample" and random.random() < config.RAW_SAMPLE_RATE))
-        return resp if keep else None
+        return strip_images(resp) if keep else None
 
     def _note(self, what, err):
         self.stats["enrich_errors"] += 1
